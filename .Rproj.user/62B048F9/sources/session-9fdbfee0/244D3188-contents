@@ -2,10 +2,74 @@
 title: "Rapport d'analyse"
 author: "Saighi Achraf et Dejmai Anis"
 date: "`r Sys.Date()`"
-output: pdf_document
+output: 
+  pdf_document: 
+    toc: true
+    number_sections: true
 ---
+# Statistiques Descriptives et Enseignements Tirés
+## Analyse et prétraitement de données
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+l'etude se porte sur un jeu de données contenant **3220** enregistrements répartis de manière équilibré sur **92** sites differents, soit une étude sur 35 mois consécutifs par site, de janvier 2019 à novembre 2021, sans valeurs manquantes, sans doublons et sans consommation nulle ou négative.
+Chaque ligne donne, pour un site (NAME), une période de facturation (BEGIN à END) et l'énergie facturée en kWh (KWH_PERIOD).
+
+
+
+```{r include=FALSE}
+packages_requis <- c("tidyverse", "lubridate", "forecast", "tseries", "gridExtra", "scales")
+nouveaux_packages <- packages_requis[!(packages_requis %in% installed.packages()[, "Package"])]
+if (length(nouveaux_packages)) install.packages(nouveaux_packages)
+
+library(tidyverse)
+library(lubridate)
+library(forecast)
+library(tseries)
+library(gridExtra)
+library(scales)
 ```
+```{r, echo=FALSE}
+raw_df <- read.csv("TimeSeries.csv", stringsAsFactors = FALSE)
+```
+```{r, echo=FALSE}
+head(raw_df)
+```
+```{r, echo=FALSE}
+summary(raw_df)
+```
+
+```{r, echo=FALSE}
+cat("date min :", raw_df$BEGIN[1], "\n")
+cat("date max :", raw_df$END[nrow(raw_df)])
+```
+
+Toutefois, la colonne KWH_PERIOD est stockée sous forme textuelle avec un séparateur de milliers par espace, nécessitant un prétraitement avant l'étude, on ajoute alors la colonne KWH, qui contient la représentation numérique de la consommation.
+
+On a également pensé à ajouter les colonnes BEGIN_DT et END_DT qui représentent les dates de debut et de fin prévues pour chaque mois, DAYS_BILLED et DAYS_EXPECTED, ça nous permettra de detecter les erreurs liées aux periodes de facturation ou du nombre de jours dans un mois donné. Ainsi que YEAR_MONTH qui nous donne le mois et l'année facturé ce qui nous permet une étude plus lisible. Et finalement, on a remarqué que les noms des stations contiennent des suffixes (ex : BR, BB...) on a pensé à ajouter la colonne SUB_PARK pour classer les stations selon leurs suffixes, ce qui nous donnera peut-être des informations utiles.
+
+La tête de notre jeu de données et son summary s'afficherons ainsi :
+
+
+```{r, echo=FALSE}
+df <- raw_df %>%
+  mutate(
+    # Suppression de tous les espaces et conversion en numérique
+    KWH = as.numeric(gsub("[[:space:]]", "", KWH_PERIOD)),
+    BEGIN_DT = dmy(BEGIN),
+    END_DT   = dmy(END),
+    # Calcul de la durée facturée vs durée théorique du mois calendaire
+    DAYS_BILLED   = as.numeric(END_DT - BEGIN_DT) + 1,
+    DAYS_EXPECTED = days_in_month(BEGIN_DT),
+    # Extraction du sous-parc (2 dernières lettres du site : BB, BR, KO)
+    SUB_PARK = str_sub(NAME, -2, -1),
+    YEAR_MONTH = format(BEGIN_DT, "%Y-%m")
+  ) %>%
+  arrange(NAME, BEGIN_DT)
+```
+```{r, echo=FALSE}
+head(df)
+```
+```{r, echo=FALSE}
+summary(df)
+```
+
 
