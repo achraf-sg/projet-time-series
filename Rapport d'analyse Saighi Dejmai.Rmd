@@ -1,14 +1,14 @@
 ---
 title: "Rapport d'analyse"
-author: "Saighi Achraf et Dejmai Anis"
+author: "Saighi Achraf et Djemai Anis"
 date: "`r Sys.Date()`"
 output: 
   pdf_document: 
     toc: true
     number_sections: true
 ---
-# Statistiques Descriptives et Enseignements Tirés
-## Analyse et prétraitement de données
+# Exploration Initiale et Découverte Statistique
+## Structure et intégrité du panel
 
 l'etude se porte sur un jeu de données contenant **3220** enregistrements répartis de manière équilibré sur **92** sites differents, soit une étude sur 35 mois consécutifs par site, de janvier 2019 à novembre 2021, sans valeurs manquantes, sans doublons et sans consommation nulle ou négative.
 Chaque ligne donne, pour un site (NAME), une période de facturation (BEGIN à END) et l'énergie facturée en kWh (KWH_PERIOD).
@@ -16,16 +16,14 @@ Chaque ligne donne, pour un site (NAME), une période de facturation (BEGIN à E
 
 
 ```{r include=FALSE}
-packages_requis <- c("tidyverse", "lubridate", "forecast", "tseries", "gridExtra", "scales")
-nouveaux_packages <- packages_requis[!(packages_requis %in% installed.packages()[, "Package"])]
-if (length(nouveaux_packages)) install.packages(nouveaux_packages)
-
 library(tidyverse)
 library(lubridate)
 library(forecast)
 library(tseries)
 library(gridExtra)
 library(scales)
+library(knitr)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.align = "center", fig.width = 6, fig.height = 4)
 ```
 ```{r, echo=FALSE}
 raw_df <- read.csv("TimeSeries.csv", stringsAsFactors = FALSE)
@@ -44,32 +42,169 @@ cat("date max :", raw_df$END[nrow(raw_df)])
 
 Toutefois, la colonne KWH_PERIOD est stockée sous forme textuelle avec un séparateur de milliers par espace, nécessitant un prétraitement avant l'étude, on ajoute alors la colonne KWH, qui contient la représentation numérique de la consommation.
 
-On a également pensé à ajouter les colonnes BEGIN_DT et END_DT qui représentent les dates de debut et de fin prévues pour chaque mois, DAYS_BILLED et DAYS_EXPECTED, ça nous permettra de detecter les erreurs liées aux periodes de facturation ou du nombre de jours dans un mois donné. Ainsi que YEAR_MONTH qui nous donne le mois et l'année facturé ce qui nous permet une étude plus lisible. Et finalement, on a remarqué que les noms des stations contiennent des suffixes (ex : BR, BB...) on a pensé à ajouter la colonne SUB_PARK pour classer les stations selon leurs suffixes, ce qui nous donnera peut-être des informations utiles.
+On a également pensé à ajouter les colonnes BEGIN_DT et END_DT qui donne la représentation de dates sous le format AAAA-MM-JJ, DAYS_BILLED et DAYS_EXPECTED, ça nous permettra de detecter les erreurs liées aux periodes de facturation ou du nombre de jours dans un mois donné. Ainsi que YEAR_MONTH qui nous donne le mois et l'année facturé ce qui nous permet une étude plus lisible. 
 
-La tête de notre jeu de données et son summary s'afficherons ainsi :
+La tête de notre jeu de données s'affichera ainsi :
 
 
 ```{r, echo=FALSE}
 df <- raw_df %>%
   mutate(
-    # Suppression de tous les espaces et conversion en numérique
     KWH = as.numeric(gsub("[[:space:]]", "", KWH_PERIOD)),
     BEGIN_DT = dmy(BEGIN),
-    END_DT   = dmy(END),
-    # Calcul de la durée facturée vs durée théorique du mois calendaire
-    DAYS_BILLED   = as.numeric(END_DT - BEGIN_DT) + 1,
+    END_DT = dmy(END),
+    DAYS_BILLED = as.numeric(END_DT - BEGIN_DT) + 1,
     DAYS_EXPECTED = days_in_month(BEGIN_DT),
-    # Extraction du sous-parc (2 dernières lettres du site : BB, BR, KO)
-    SUB_PARK = str_sub(NAME, -2, -1),
-    YEAR_MONTH = format(BEGIN_DT, "%Y-%m")
+    YEAR_MONTH = format(BEGIN_DT, "%Y-%m"),
   ) %>%
   arrange(NAME, BEGIN_DT)
 ```
 ```{r, echo=FALSE}
 head(df)
 ```
+Vérifions l’intégrité du jeu de données avant de commencer notre modélisation. Nous remarquons aussi à partir des 6 premières lignes de notre jeu de données que la colonne (NAME) à un motif de 4 chiffres suivis de 2 lettres. Extrayons nous ces 2 dernières lettres pour voir si cette structuration reste stable tout au long du jeu de données et si on peut avoir des informations intéressantes.
+
 ```{r, echo=FALSE}
-summary(df)
+# Vérification dynamique du cylindrage et extraction des suffixes
+verif_panel <- df %>%
+  count(NAME, name = "Nb_Mois") %>%
+  summarise(
+    `Nombre de sites uniques` = n(),
+    `Factures par site (Min)` = min(Nb_Mois),
+    `Factures par site (Max)` = max(Nb_Mois),
+    `Valeurs Manquantes (NA)` = sum(is.na(df$KWH))
+  )
+
+kable(verif_panel, caption = "Vérification de l'équilibrage du jeu de données")
 ```
+```{r}
+df <- df %>% mutate(SUB_PARK = str_sub(NAME, -2, -1))
 
+repartition_parcs <- df %>%
+  group_by(`Sous-parc détecté` = SUB_PARK) %>%
+  summarise(`Nombre de sites` = n_distinct(NAME), `Nombre de factures` = n())
 
+kable(repartition_parcs, caption = "Répartition dynamique des sites par suffixe")
+```
+La requête d'exploration révèle que le fichier contient un panel parfaitement équilibré. L'analyse des identifiants (NAME) montre également que tous respectent un motif strict de 4 chiffres suivis de 2 lettres. Nous extrayons dynamiquement ces deux dernières lettres pour découvrir les sous-parcs.
+
+## Statistiques Descriptives et Constat d'Asymétrie
+```{r}
+stats_globales <- df %>%
+  summarise(
+    Périmètre = "Global (Brut)",
+    Moyenne = round(mean(KWH), 0),
+    `Écart-type` = round(sd(KWH), 0),
+    Médiane = round(median(KWH), 0),
+    Q3 = round(quantile(KWH, 0.75), 0),
+    Max = round(max(KWH), 0)
+  )
+
+stats_par_parc <- df %>%
+  group_by(Périmètre = paste0("Groupe ", SUB_PARK)) %>%
+  summarise(
+    Moyenne = round(mean(KWH), 0),
+    `Écart-type` = round(sd(KWH), 0),
+    Médiane = round(median(KWH), 0),
+    Q3 = round(quantile(KWH, 0.75), 0),
+    Max = round(max(KWH), 0),
+    .groups = 'drop'
+  )
+
+kable(bind_rows(stats_globales, stats_par_parc), caption = "Statistiques descriptives - Constat d'asymétrie")
+```
+L'analyse des mesures de tendance centrale et de dispersion sur l'ensemble du jeu de données fait immédiatement ressortir une anomalie de distribution majeure. La moyenne globale est tirée vers le haut de manière disproportionnée par rapport à la médiane. Ce qui nous mène à constater la présence d'une ou de plusieurs anomalies. De première vu, on peut voir que l’anomalie est présente dans le groupe BR. 
+Voyons ça de plus près.
+
+## Identification Automatique des Sites Hors-Échelle
+
+L'écart observé ci-dessus suggère que certains sites ne sont pas des antennes mobiles classiques. Pour les isoler algorithmiquement, nous calculons la médiane de chaque site et appliquons la barrière de Tukey pour les valeurs extrêmes sur la distribution de ces médianes (Q3 + 10 * IQR)
+
+```{r}
+stats_par_site <- df %>%
+  group_by(NAME) %>%
+  summarise(Mediane_Site = median(KWH), .groups = 'drop')
+
+q25 <- quantile(stats_par_site$Mediane_Site, 0.25)
+q75 <- quantile(stats_par_site$Mediane_Site, 0.75)
+iqr <- q75 - q25
+seuil_extreme <- q75 + 10 * iqr
+
+sites_hors_echelle <- stats_par_site %>%
+  filter(Mediane_Site > seuil_extreme) %>%
+  rename(Site = NAME, `Médiane mensuelle (kWh)` = Mediane_Site) %>%
+  arrange(desc(`Médiane mensuelle (kWh)`))
+
+kable(sites_hors_echelle, caption = paste("Détection algorithmique des sites hors-échelle (Seuil calculé >", round(seuil_extreme, 0), "kWh)"))
+```
+L'étude nous confirme notre observation précédente et détecte 2 anomalies dans le groupe BR, les sites **0698BR** et **0998BR** ont des médianes de **432 772 KWH** et **347208 KWH** respectivement alors que la médiane globale est **2 218 KWH**. Ces sites seront isolés pour ne pas fausser les analyses statistiques globales.
+
+# Détection des Erreurs de Facturation
+
+Nous balayons dynamiquement le parc pour séparer de manière mathématique les vraies erreurs de facturation des simples évolutions structurelles du réseau.
+## Test 1 : Anomalies Calendaires (Périodes incomplètes)
+Un mois facturé doit démarrer le 1er du mois et durer exactement le nombre de jours calendaires. Nous avons détecté les anomalies suivantes :
+
+```{r}
+anomalies_calendaires <- df %>%
+  filter(day(BEGIN_DT) != 1 | DAYS_BILLED != DAYS_EXPECTED)
+
+# 2. Calcul de la consommation de référence (médiane des mois complets) pour les sites concernés
+reference_sites <- df %>%
+  filter(NAME %in% anomalies_calendaires$NAME & DAYS_BILLED == DAYS_EXPECTED) %>%
+  group_by(NAME) %>%
+  summarise(`Médiane 30 jours (kWh)` = median(KWH), .groups = 'drop')
+
+# 3. Enrichissement du tableau d'anomalies avec la preuve mathématique
+anomalies_enrichies <- anomalies_calendaires %>%
+  left_join(reference_sites, by = "NAME") %>%
+  select(Site = NAME, Début = BEGIN, Fin = END, 
+         `Jours facturés` = DAYS_BILLED, 
+         `Jours théoriques` = DAYS_EXPECTED, 
+         `kWh facturés` = KWH, 
+         `Médiane 30 jours (kWh)`)
+
+kable(anomalies_enrichies, caption = "Anomalies de dates croisées avec l'historique de consommation")
+```
+Le site **0089KO** à été facturé pour 28 jours en février 2020 alors que c'est une année bissextile.
+Le site **0628BR** n'est pas facturé pour la période du 01/09/2021 au 14/09/2021, la facturation sur ce mois est ainsi sur 16 jours, en comparant avec la médiane de consommation sur ce site, on remarque que la consommation de Septembre 2021 reste très proche de la médiane, ce qui confirme clairement la présence d'une erreur saisie ou une double facturation, soit le site à été facturé pour 30 jours au lieu de 16, soit la date du début de periode est fausse.
+
+## Test 2 : Séparation mathématique entre « Ruptures de Régime » et « Erreurs Ponctuelles de Facturation »
+
+### Détection des ruptures permanentes de niveau (Médiane glissante sur 6 mois)
+Pour chaque site, on calcule la médiane mobile sur une fenêtre de 6 mois, et on évalue l'amplitude maximale de changement de régime sur les 3 ans. En filtrant sur Ratio_Rupture > 1,7, l'algorithme isole automatiquement 10 sites ayant subi une mutation structurelle :
+
+```{r}
+# Détection mathématique des changements structurels avec extraction de la chronologie
+ruptures_regime <- df %>%
+  group_by(NAME) %>%
+  arrange(BEGIN_DT) %>%
+  mutate(
+    # Calcul de la médiane glissante sur 6 mois
+    Med_6M = map_dbl(seq_along(KWH), ~ ifelse(.x < 6, NA_real_, median(KWH[(.x - 5):.x])))
+  ) %>%
+  summarise(
+    Min_6M = min(Med_6M, na.rm = TRUE),
+    Mois_Min = YEAR_MONTH[which.min(Med_6M)],
+    Max_6M = max(Med_6M, na.rm = TRUE),
+    Mois_Max = YEAR_MONTH[which.max(Med_6M)],
+    `Ratio (Max/Min)` = round(Max_6M / Min_6M, 2),
+    .groups = 'drop'
+  ) %>%
+  # Règle de décision : un écart supérieur à un facteur 1.7
+  filter(`Ratio (Max/Min)` > 1.70) %>%
+  arrange(desc(`Ratio (Max/Min)`)) %>%
+  # Déduction dynamique de la nature de la rupture selon la chronologie
+  mutate(
+    Diagnostic = ifelse(Mois_Max > Mois_Min, "Hausse d'infrastructure", "Chute / Défaillance de comptage")
+  ) %>%
+  select(Site = NAME, 
+         `Palier Bas (kWh)` = Min_6M, `Atteint en` = Mois_Min,
+         `Palier Haut (kWh)` = Max_6M, `Atteint le` = Mois_Max, 
+         `Ratio (Max/Min)`, Diagnostic)
+
+kable(ruptures_regime, caption = "Analyse comparative des régimes : Détection algorithmique des évolutions de palier")
+```
+- **1 effondrement massif de comptage (Ratio = 19,81)** : Le site **1240BR** passe d'une médiane glissante de 3 170 kWh à 160 kWh. C'est la signature d'un compteur bloqué ou d'un site démonté dont l'abonnement résiduel court toujours
+- **6 hausses permanentes de palier** : Les sites **1978KO** (×3,52), **1088KO** (×3,45), **1093KO** (×2,19) et **1986KO** (×2,13) doublent ou triplent de consommation et restent parfaitement stables sur ce nouveau palier. De même pour **1911BB** (×3,18) et **0356KO** (×2,67). Diagnostic : Évolutions matérielles légitimes du réseau (ajout d'équipements actifs), et non erreurs de facturation.
+- **2 baisses permanentes de palier en 2019** : Les sites **0254BB** et **1067KO** passent d'un palier haut en 2019 à un palier stable à partir de 2020/2021, c'est le signe d'une optimisation énergétique ou retrait d'équipements.
